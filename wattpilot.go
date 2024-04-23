@@ -55,6 +55,8 @@ type Wattpilot struct {
 	_password       string
 	_isInitialized  bool
 	_isConnected    bool
+	_inConnection 	bool
+	_inDisconnect	bool
 	_status         map[string]interface{}
 	_eventHandler   map[string]eventFunc
 
@@ -90,7 +92,7 @@ func New(host string, password string) *Wattpilot {
 
 	w._log = log.New()
 	w._log.SetFormatter(&log.JSONFormatter{})
-	w._log.SetLevel(log.ErrorLevel)
+	w._log.SetLevel(log.DebugLevel)
 	if level := os.Getenv("WATTPILOT_LOG"); level != "" {
 		if err := w.ParseLogLevel(level); err != nil {
 			w._log.Warn("Could not parse log level setting ", err)
@@ -337,6 +339,11 @@ func (w *Wattpilot) Disconnect() {
 }
 
 func (w *Wattpilot) disconnectImpl() {
+	if w._inConnection {
+		w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("Cancel disconnect, connection in process")
+		return
+	}
+	w._inDisconnect= true
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Disconnecting...")
 
 	if !w._isInitialized && w._currentConnection == nil {
@@ -355,25 +362,26 @@ func (w *Wattpilot) disconnectImpl() {
 	w._isConnected = false
 	w._currentConnection = nil
 	w._status = make(map[string]interface{})
-
+	w._inDisconnect= false
 }
 
 func (w *Wattpilot) Connect() error {
-
+	
+	w._inConnection =true
+	
 	if w._isConnected || w._isInitialized {
 		w._log.WithFields(log.Fields{"wattpilot": w._host}).Debug("Already Connected")
+		w._inConnection =false
 		return nil
 	}
 
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Connecting")
-	w._readMutex.Lock()
-	
+
 	var err error
 	dialContext, cancel := context.WithTimeout(w._readContext, time.Second*CONTEXT_TIMEOUT)
 	defer cancel()
 	conn, reader, _, err := ws.DefaultDialer.Dial(dialContext, fmt.Sprintf("ws://%s/ws", w._host))
 	if err != nil {
-		w._readMutex.Unlock()
 		return err
 	}
 	w._currentConnection = &conn
@@ -385,21 +393,23 @@ func (w *Wattpilot) Connect() error {
 	w._isConnected = <-w.connected
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("Connection is ", w._isConnected)
 	if !w._isConnected {
-		w._readMutex.Unlock()
 		return errors.New("could not connect")
 	}
 
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("Connected - waiting for initializiation...")
-	w._readMutex.Unlock()
+
 	<-w.initialized
-	
+
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("Connected - and initializiated")
 
 	return nil
 }
 
 func (w *Wattpilot) reconnect() {
-
+	if w._inConnection {
+		w._log.WithFields(log.Fields{"wattpilot": w._host}).Debug("Cancel Reconnect, connection in process")
+		return
+	}
 	if w._isConnected && !w._isInitialized {
 		w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Reconnect - Is still connected")
 		return
@@ -427,9 +437,7 @@ func (w *Wattpilot) processLoop(ctx context.Context) {
 			delay.Reset(delayDuration)
 			if !w._isInitialized {
 				w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("No Hello there")
-				w.disconnectImpl()
-				w.reconnect()
-				break
+				continue
 			}
 			w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("Hello there")
 			go func() {
@@ -449,7 +457,7 @@ func (w *Wattpilot) processLoop(ctx context.Context) {
 
 		case <-ctx.Done():
 		case <-w._interrupt:
-			w._log.WithFields(log.Fields{"wattpilot": w._host}).Trace("Stopping process loop...")
+			w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Stopping process loop...")
 			w.disconnectImpl()
 			if !delay.Stop() {
 				<-delay.C
@@ -464,12 +472,19 @@ func (w *Wattpilot) receiveHandler(ctx context.Context) {
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Starting receive handler...")
 
 	for {
+		
+
+		if w._currentConnection == nil {
+			time.Sleep(time.Second * time.Duration(RECONNECT_TIMEOUT))
+			w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Stopping receive handler, because NIL connection...")
+			w.disconnectImpl()
+			w.reconnect()
+			return
+		}
 		msg, err := wsutil.ReadServerText(*w._currentConnection)
 		if err != nil {
 			// w._readCancel()
 			w._log.WithFields(log.Fields{"wattpilot": w._host}).Info("Stopping receive handler...")
-			w.disconnectImpl()
-			w.reconnect()
 			return
 		}
 		data := make(map[string]interface{})
@@ -498,6 +513,11 @@ func (w *Wattpilot) GetProperty(name string) (interface{}, error) {
 	w._log.WithFields(log.Fields{"wattpilot": w._host}).Debug("Get Property ", name)
 
 	if !w._isInitialized {
+		w._log.WithFields(log.Fields{"wattpilot": w._host}).Debug("Get Prop conn invalid init:", w._isInitialized," Connected:",w._isConnected, " inConnection:",w._inConnection, "conn handle:",w._currentConnection)
+		if !w._isConnected && !w._inConnection && w._currentConnection == nil  && w._isInitialized{
+			w._log.WithFields(log.Fields{"wattpilot": w._host}).Debug("Get Prop conn invalid - reconnecting")
+			w.reconnect()
+		}
 		return nil, errors.New("connection is not valid")
 	}
 

@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	api "github.com/mabunixda/wattpilot"
 )
@@ -59,6 +61,14 @@ func inGetValue(w *api.Wattpilot, data []string) {
 }
 func inSetValue(w *api.Wattpilot, data []string) {
 	if len(data) <= 1 {
+		return
+	}
+	if data[0]=="sleep" {
+		sleep_time, err := strconv.Atoi(data[1])
+		if err == nil {
+			fmt.Println("Sleeping for ", sleep_time)
+			time.Sleep(time.Second *time.Duration(sleep_time))
+		}
 		return
 	}
 	err := w.SetProperty(data[0], data[1])
@@ -143,9 +153,6 @@ func inDisconnect(w *api.Wattpilot, data []string) {
 	w.Disconnect()
 }
 
-// func processUpdates(ups <-chan interface{}) {
-// 	updates = ups
-// }
 
 var interrupt chan os.Signal
 
@@ -158,19 +165,29 @@ func main() {
 	if host == "" || pwd == "" {
 		return
 	}
+	host2 := os.Getenv("WATTPILOT_HOST1")
+	pwd2 := os.Getenv("WATTPILOT_PASSWORD1")
+	
+	if host2 == "" || pwd2 == "" {
+		return
+	}
 	if level == "" {
-		level = "WARN"
+		level = "DEBUG"
 	}
 	w := api.New(host, pwd)
 	if err := w.ParseLogLevel(level); err != nil {
 		fmt.Println("Could not update loglevel to", level, err)
 	}
-	// just a sample to test notification updates
-	// processUpdates(w.GetNotifications("fhz"))
+	w2 := api.New(host2, pwd2)
+	if err := w2.ParseLogLevel(level); err != nil {
+		fmt.Println("Could not update loglevel to", level, err)
+	}
+	//just a sample to test notification updates
+	//processUpdates(w.GetNotifications("fhz"))
 	inConnect(w, nil)
-
+	inConnect(w2, nil)
 	w.StatusInfo()
-
+	w2.StatusInfo()
 	for {
 		select {
 
@@ -179,8 +196,9 @@ func main() {
 			break
 
 		case <-interrupt:
-			w.Disconnect()
-			return
+			//w.Disconnect()
+			//return
+			continue
 
 		default:
 			fmt.Print("wattpilot> ")
@@ -191,7 +209,9 @@ func main() {
 			}
 			words := strings.Fields(str)
 			if len(words) < 1 {
-				continue
+				words = strings.Fields("get eto")
+				
+				//continue
 			}
 
 			data := words[1:]
@@ -201,6 +221,7 @@ func main() {
 				continue
 			}
 			inputs[cmd[0]](w, data)
+			inputs[cmd[0]](w2, data)
 			fmt.Println("")
 		}
 	}
